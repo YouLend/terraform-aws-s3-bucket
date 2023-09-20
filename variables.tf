@@ -4,6 +4,14 @@ variable "create_bucket" {
   default     = true
 }
 
+variable "create_logging_bucket" {
+  description = "Controls if S3 bucket should be created"
+  type        = bool
+  default     = false
+}
+
+
+
 variable "attach_elb_log_delivery_policy" {
   description = "Controls if S3 bucket should have ELB log delivery policy attached"
   type        = bool
@@ -148,11 +156,6 @@ variable "versioning" {
   default     = {}
 }
 
-variable "logging" {
-  description = "Map containing access bucket logging configuration."
-  type        = map(string)
-  default     = {}
-}
 
 variable "access_log_delivery_policy_source_buckets" {
   description = "(Optional) List of S3 bucket ARNs wich should be allowed to deliver access logs to this bucket."
@@ -197,6 +200,12 @@ variable "replication_configuration" {
 }
 
 variable "server_side_encryption_configuration" {
+  description = "Map containing server-side encryption configuration."
+  type        = any
+  default     = {}
+}
+
+variable "logging_bucket_server_side_encryption_configuration" {
   description = "Map containing server-side encryption configuration."
   type        = any
   default     = {}
@@ -310,8 +319,19 @@ variable "object_ownership" {
   default     = "BucketOwnerEnforced"
 }
 
-variable "putin_khuylo" {
-  description = "Do you agree that Putin doesn't respect Ukrainian sovereignty and territorial integrity? More info: https://en.wikipedia.org/wiki/Putin_khuylo!"
-  type        = bool
-  default     = true
+
+variable "logging_bucket_name" {
+  type        = string
+  description = "Name of the S3 Bucket"
+  default     = ""
+
+}
+
+variable "logging_bucket_list" {
+  type = map(object({
+    bucket_id     = string
+    target_prefix = string
+  }))
+  description = "A map of buckets with their ID and target prefix to enable server access logging"
+  default     = {}
 }
