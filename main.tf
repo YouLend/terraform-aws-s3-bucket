@@ -1,27 +1,3 @@
-data "aws_region" "current" {}
-
-data "aws_canonical_user_id" "this" {
-  count = local.create_bucket && local.create_bucket_acl && try(var.owner["id"], null) == null ? 1 : 0
-}
-
-data "aws_caller_identity" "current" {}
-
-data "aws_partition" "current" {}
-locals {
-  create_bucket = var.create_bucket && var.putin_khuylo
-
-  create_bucket_acl = (var.acl != null && var.acl != "null") || length(local.grants) > 0
-
-  attach_policy = var.attach_require_latest_tls_policy || var.attach_access_log_delivery_policy || var.attach_elb_log_delivery_policy || var.attach_lb_log_delivery_policy || var.attach_deny_insecure_transport_policy || var.attach_inventory_destination_policy || var.attach_deny_incorrect_encryption_headers || var.attach_deny_incorrect_kms_key_sse || var.attach_deny_unencrypted_object_uploads || var.attach_policy
-
-  # Variables with type `any` should be jsonencode()'d when value is coming from Terragrunt
-  grants               = try(jsondecode(var.grant), var.grant)
-  cors_rules           = try(jsondecode(var.cors_rule), var.cors_rule)
-  lifecycle_rules      = try(jsondecode(var.lifecycle_rule), var.lifecycle_rule)
-  intelligent_tiering  = try(jsondecode(var.intelligent_tiering), var.intelligent_tiering)
-  metric_configuration = try(jsondecode(var.metric_configuration), var.metric_configuration)
-}
-
 resource "aws_s3_bucket" "this" {
   count = local.create_bucket ? 1 : 0
 
@@ -31,15 +7,6 @@ resource "aws_s3_bucket" "this" {
   force_destroy       = var.force_destroy
   object_lock_enabled = var.object_lock_enabled
   tags                = var.tags
-}
-
-resource "aws_s3_bucket_logging" "this" {
-  count = local.create_bucket && length(keys(var.logging)) > 0 ? 1 : 0
-
-  bucket = aws_s3_bucket.this[0].id
-
-  target_bucket = var.logging["target_bucket"]
-  target_prefix = try(var.logging["target_prefix"], null)
 }
 
 resource "aws_s3_bucket_acl" "this" {
@@ -1093,4 +1060,194 @@ resource "aws_s3_bucket_analytics_configuration" "this" {
       }
     }
   }
+}
+
+#################################################################
+# S3 Access Logging
+#################################################################
+
+resource "aws_s3_bucket_logging" "bucket" {
+  for_each      = { for k, v in var.logging_bucket_list : k => v if local.create_logging_bucket }
+  bucket        = each.value["bucket_id"]
+  target_bucket = aws_s3_bucket.accesslogbucket[0].id
+  target_prefix = each.value["target_prefix"]
+}
+
+
+
+#tfsec:ignore:aws-s3-enable-bucket-logging tfsec:ignore:aws-s3-encryption-customer-key  tfsec:ignore:aws-s3-enable-bucket-encryption
+resource "aws_s3_bucket" "accesslogbucket" {
+  count         = local.create_logging_bucket ? 1 : 0
+  bucket        = local.logging_bucket_name
+  force_destroy = true
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "accesslogbucket" {
+  count  = local.create_logging_bucket && length(keys(var.logging_bucket_server_side_encryption_configuration)) > 0 ? 1 : 0
+  bucket = aws_s3_bucket.accesslogbucket[0].id
+
+  dynamic "rule" {
+    for_each = try(flatten([var.server_side_encryption_configuration["rule"]]), [])
+
+    content {
+      bucket_key_enabled = try(rule.value.bucket_key_enabled, null)
+
+      dynamic "apply_server_side_encryption_by_default" {
+        for_each = try([rule.value.apply_server_side_encryption_by_default], [])
+
+        content {
+          sse_algorithm     = apply_server_side_encryption_by_default.value.sse_algorithm
+          kms_master_key_id = try(apply_server_side_encryption_by_default.value.kms_master_key_id, null)
+        }
+      }
+    }
+  }
+}
+
+
+resource "aws_s3_bucket_versioning" "accesslogbucket" {
+  count  = local.create_logging_bucket ? 1 : 0
+  bucket = aws_s3_bucket.accesslogbucket[0].id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_iam_role" "s3_logging_bucket_accessrole" {
+  count = local.create_logging_bucket ? 1 : 0
+  name  = local.logging_bucket_role_name
+
+  assume_role_policy = <<POLICY
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": "sts:AssumeRole",
+      "Principal": {
+        "Service": "s3.amazonaws.com"
+      },
+      "Effect": "Allow",
+      "Sid": ""
+    }
+  ]
+}
+POLICY
+}
+
+
+resource "aws_s3_bucket_public_access_block" "accesslogbucket" {
+  count                   = local.create_logging_bucket ? 1 : 0
+  bucket                  = aws_s3_bucket.accesslogbucket[0].id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+  depends_on = [
+    aws_s3_bucket.accesslogbucket
+  ]
+}
+
+resource "aws_s3_bucket_policy" "b" {
+  count  = local.create_logging_bucket ? 1 : 0
+  bucket = aws_s3_bucket.accesslogbucket[0].id
+
+  policy = <<POLICY
+{
+    "Version": "2012-10-17",
+    "Statement": [
+            {
+            "Effect": "Allow",
+            "Principal": {
+                "AWS": [
+                "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:role/${aws_iam_role.s3_logging_bucket_accessrole[0].name}"
+                ]
+            },
+            "Action": "s3:*",
+            "Resource": [
+                "${aws_s3_bucket.accesslogbucket[0].arn}",
+                "${aws_s3_bucket.accesslogbucket[0].arn}/*"
+            ]
+        },
+        {
+            "Sid": "HttpsOnly",
+            "Effect": "Deny",
+            "Principal": "*",
+            "Action": "s3:*",
+            "Resource": [
+                "${aws_s3_bucket.accesslogbucket[0].arn}",
+                "${aws_s3_bucket.accesslogbucket[0].arn}/*"
+            ],
+            "Condition": {
+                "Bool": {
+                    "aws:SecureTransport": "false"
+                }
+            }
+        }
+    ]
+}
+POLICY
+  depends_on = [
+    aws_s3_bucket.accesslogbucket
+  ]
+}
+
+resource "aws_iam_role" "replicationaccesslog" {
+  count = local.create_logging_bucket ? 1 : 0
+  name  = local.logging_bucket_replication_role_name
+
+  assume_role_policy = <<POLICY
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": "sts:AssumeRole",
+      "Principal": {
+        "Service": "s3.amazonaws.com"
+      },
+      "Effect": "Allow",
+      "Sid": ""
+    }
+  ]
+}
+POLICY
+}
+
+#tfsec:ignore:aws-iam-no-policy-wildcards
+resource "aws_iam_policy" "replicationaccesslog" {
+  count  = local.create_logging_bucket ? 1 : 0
+  name   = local.logging_bucket_replication_policy_name
+  policy = <<POLICY
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": [
+        "s3:GetReplicationConfiguration",
+        "s3:ListBucket"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "${aws_s3_bucket.accesslogbucket[0].arn}"
+      ]
+    },
+    {
+      "Action": [
+        "s3:GetObjectVersionForReplication",
+        "s3:GetObjectVersionAcl",
+         "s3:GetObjectVersionTagging"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "${aws_s3_bucket.accesslogbucket[0].arn}/*"
+      ]
+    }
+  ]
+}
+POLICY
+}
+
+resource "aws_iam_role_policy_attachment" "attach_log" {
+  count      = local.create_logging_bucket ? 1 : 0
+  role       = aws_iam_role.replicationaccesslog[0].name
+  policy_arn = aws_iam_policy.replicationaccesslog[0].arn
 }
