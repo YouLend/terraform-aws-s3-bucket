@@ -1,7 +1,7 @@
 locals {
   create_bucket                          = var.create_bucket
   create_logging_bucket                  = var.create_logging_bucket
-  logging_bucket_name                    = "${var.logging_bucket_name}-${random_id.server.hex}"
+  logging_bucket_name                    = try("${var.logging_bucket_name}-${random_id.server[0].hex}", "")
   logging_bucket_role_name               = "s3_bucket_role-${var.logging_bucket_name}"
   logging_bucket_replication_role_name   = "s3_replication_role-${var.logging_bucket_name}"
   logging_bucket_replication_policy_name = "s3_replication_policy-${var.logging_bucket_name}"
